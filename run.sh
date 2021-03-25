@@ -1,0 +1,1 @@
+sudo python3 train.py --tokenizer_path ./cache/vocab.txt --pretrained_model ./model/final_model --batch_size 8 --gradient_accumulation 8 --log_step 8 --raw --output_dir model_classfier/00/
