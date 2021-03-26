@@ -143,12 +143,8 @@ class modelMy(torch.nn.Module):
         self.device = device
         # self.attn_head = args.heads
         self.paper_encoder = transformers.models.gpt2.GPT2Model.from_pretrained(args.pretrained_model)
-        self.Q_and_C_encoder = transformers.models.gpt2.GPT2Model.from_pretrained(args.pretrained_model)
-        for p in self.Q_and_C_encoder.parameters():
-            p.requires_grad = False
 
         self.Q_P_attention = MultiHeadAttention(heads = 4, d_model = self.hidden_size, dropout=0.)
-        self.out = torch.nn.Linear(self.hidden_size,2)
         self.attn = MultiHeadAttention(4, self.hidden_size, dropout=0.)
 
         self.attn2 = MultiHeadAttention(4, self.hidden_size, dropout=0.)
@@ -159,13 +155,15 @@ class modelMy(torch.nn.Module):
         self.query_word_layer_norm = nn.LayerNorm(self.hidden_size)
         self.query_sent_layer_norm = nn.LayerNorm(self.hidden_size)
 
-        ### Context Wise Encoder
-        self.nbt = Encoder(EncoderLayer(self.hidden_size,
-                                           MultiHeadAttention(12, self.hidden_size, dropout=0.1),
+        ## Context Wise Encoder
+        self.slice_transformer = Encoder(EncoderLayer(self.hidden_size,
+                                           MultiHeadAttention(4, self.hidden_size, dropout=0.1),
                                            PositionwiseFeedForward(self.hidden_size, self.hidden_size, 0.1),
                                            0.1),
-                                      N=4)
-        self.metric = torch.nn.PairwiseDistance(p=2.0, eps=1e-06, keepdim=False)
+                                      N=1)
+        self.fuck = nn.Linear(self.hidden_size,self.hidden_size)
+        self.dropout = nn.Dropout(0.1)
+        self.metric = nn.PairwiseDistance(p=2.0, eps=1e-06, keepdim=False)
 
         self.nll = nn.CrossEntropyLoss(ignore_index=-1)
         self.eval_nll = nn.CrossEntropyLoss(ignore_index=-1)
@@ -176,79 +174,47 @@ class modelMy(torch.nn.Module):
         return token_type_ids, attention_mask
 
     def forward(self,inputs,questions, choices, labels = None,training = True):
-        # inputs = (slide_windows, 512 or len)
-        # questions = (questions, len)
-        # questions = (questions, choices, len)
         seq_len = inputs.shape[-1]
         n_slices = inputs.shape[1] # n_slices
-        n_questions = questions.shape[0]
+        n_questions = questions.shape[1]
         n_batch = inputs.shape[0]
         token_type_ids, attention_mask1 = self.make_aux_tensors(inputs)
         token_type_ids_q, attention_maskq = self.make_aux_tensors(questions)
         token_type_ids_c, attention_maskc = self.make_aux_tensors(choices)
         hidden = self.paper_encoder.forward(input_ids=inputs.view(-1,seq_len),
                                             token_type_ids=token_type_ids.view(-1,seq_len),
-                                            attention_mask=attention_mask1.view(-1,seq_len))[0] #input = (batch, n_slice, 512)
-        # hidden = (batch * n_slices, 512,768)
-        hidden_question = self.Q_and_C_encoder.forward(input_ids=questions.view(-1,seq_len),
+                                            attention_mask=attention_mask1.view(-1,seq_len)).last_hidden_state
+        hidden_question = self.paper_encoder.forward(input_ids=questions.view(-1,seq_len),
                                                        token_type_ids=token_type_ids_q.view(-1, seq_len),
-                                                       attention_mask=attention_maskq.view(-1, seq_len))[0]
+                                                       attention_mask=attention_maskq.view(-1, seq_len)).last_hidden_state
         hidden_question = hidden_question[:,0]
-        # hidden_question = (batch * n_question, 768)
-        n_questions = hidden_question.shape[0]
-        hidden_choices = self.Q_and_C_encoder.forward(input_ids=choices.view(-1,256),
-                                                       token_type_ids=token_type_ids_c.view(-1, 256),
-                                                       attention_mask=attention_maskc.view(-1, 256))[0][:,0]
-        hidden_choices = hidden_choices.resize(questions.shape[0], n_questions, (int)(hidden_choices.shape[0]/n_questions) ,self.hidden_size)
-
-        # hidden_choices = (batch ,n_questions , 4 , 768)
-
-
+        hidden_choices = self.paper_encoder.forward(input_ids=choices.view(-1,256),
+                                                       token_type_ids=token_type_ids_c.view(-1,256),
+                                                       attention_mask=attention_maskc.view(-1,256)).last_hidden_state[:,0]
+        hidden_choices  = hidden_choices.view(n_batch,n_questions,4,-1)
         hidden = torch.mul(hidden, attention_mask1.view(-1, seq_len, 1).expand(hidden.size()).float())
-        # hidden = (batch, n_slices,256,768) mask "[PAD]"
         hidden = hidden.repeat(n_questions, 1, 1)
-        # hidden = (batch, n_questions * n_slices,256,768)
-        # hidden_question = (batch, n_questions ,768)
-        # hidden_question ' = (batch, n_questions * n_slice,768)
-        hidden_question = hidden_question.repeat(1, n_slices).view(n_slices*n_questions,-1)
+        hidden_question =hidden_question.repeat(1,n_batch*n_slices).view(n_batch*n_slices*n_questions, -1)
         hidden = self.attn(self.query_word_layer_norm(hidden_question), hidden, hidden,
                            mask=attention_mask1.view(-1, 1, seq_len).repeat(n_questions,1, 1))
-        # hidden = (batch, n_questions * n_slices,768)
-        # hidden = hidden.squeeze()
         
         hidden = hidden.view(n_questions, n_batch, n_slices, self.hidden_size).view(-1,n_slices,self.hidden_size)
-        # hidden = (n_questions ,n_slices, 768)
         hidden = self.word_layer_norm(hidden)
         hidden = self.add_pe(hidden)
-
-        # hidden = hidden.view(n_questions* n_slices, -1)
-        # hidden = (n_questions * n_slices,768)
-        slice_mask = torch.tril(torch.ones(n_slices, n_slices)).to(self.device)
-
-        slice_mask = slice_mask.repeat(n_questions, 1, 1)
-        # transformer`
-        hidden = self.nbt(hidden, slice_mask)
-        # hidden = (n_questions , n_slice, 768)
-        # hidden_question = (n_questions , 768)
-        hidden = self.attn2(self.query_sent_layer_norm(hidden_question).view(n_questions*n_batch,n_slices,self.hidden_size), hidden, hidden,
+        slice_mask = torch.tril(torch.ones(n_slices, n_slices)).unsqueeze(0).repeat(n_questions,1,1).to(self.device)
+        hidden = self.slice_transformer(hidden,slice_mask)
+        hidden = self.attn2(self.query_sent_layer_norm(hidden_question).view(-1,n_slices,self.hidden_size), hidden, hidden,
                             mask=slice_mask)
-        # hidden = (n_questions, n_slice , 768)
-        hidden = hidden[:,0].unsqueeze(0).unsqueeze(2).repeat(1,1,4,1)
-        # _hidden = (n_questions ,4 , 768)
+        hidden = self.sent_layer_norm(self.fuck(self.dropout(hidden)))
+        hidden = hidden[:,-1].unsqueeze(0).unsqueeze(2).repeat(1,1,4,1)
         _dist = -self.metric(hidden.view(-1,self.hidden_size),hidden_choices.view(-1,self.hidden_size)).view(1,n_questions,-1)
-        # _dist = (n_questions ,4 )
         _, pred = torch.max(_dist, -1)
         if labels is not None:
-            # labels = labels.squeeze(0)
-            # zzz = torch.full(size=(labels.shape[1], labels.shape[2]), fill_value=0)
-            # zzz.scatter_(dim=1, index=labels.squeeze(0), value=1)
             acc = torch.mean(pred.eq(labels).view(-1).float())
             if(training == False):
                 _loss = self.eval_nll(_dist.view(n_batch * n_questions, -1), labels.view(-1))
             else:
                 _loss = self.nll(_dist.view(n_batch * n_questions, -1), labels.view(-1))
-
-            # torch.nn.CrossEntropyLoss(torch.softmax(_dist,dim=-1).squeeze(0), labels.squeeze(0))
             return _loss,pred,acc
         return pred
 
