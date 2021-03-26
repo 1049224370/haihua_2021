@@ -187,10 +187,10 @@ class modelMy(torch.nn.Module):
         hidden_question = self.paper_encoder.forward(input_ids=questions.view(-1,seq_len),
                                                        token_type_ids=token_type_ids_q.view(-1, seq_len),
                                                        attention_mask=attention_maskq.view(-1, seq_len)).last_hidden_state
-        hidden_question = hidden_question[:,0]
+        hidden_question = hidden_question[:,-1]
         hidden_choices = self.paper_encoder.forward(input_ids=choices.view(-1,256),
                                                        token_type_ids=token_type_ids_c.view(-1,256),
-                                                       attention_mask=attention_maskc.view(-1,256)).last_hidden_state[:,0]
+                                                       attention_mask=attention_maskc.view(-1,256)).last_hidden_state[:,-1]
         hidden_choices  = hidden_choices.view(n_batch,n_questions,4,-1)
         hidden = torch.mul(hidden, attention_mask1.view(-1, seq_len, 1).expand(hidden.size()).float())
         hidden = hidden.repeat(n_questions, 1, 1)
